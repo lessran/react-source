@@ -13,6 +13,7 @@ function FuncComponent (props) {
     <div>
       FuncComponent-{props.name}
       <button onClick={()=>{setCount(count+1)}}>{count}</button>
+      {count % 3 === 0 && <div>条件显示</div>}
     </div>
   )
 }

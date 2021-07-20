@@ -1,4 +1,4 @@
-import { TEXT, PLACEMENT } from "./const";
+import { TEXT, PLACEMENT, UPDATE, DELETION } from "./const";
 /* eslint-disable */
 
 
@@ -6,6 +6,12 @@ import { TEXT, PLACEMENT } from "./const";
 let nextUnitOfWork = null;
 // work in progress fiber root
 let wipRoot = null;
+
+let wipFiber = null;
+
+let currentNode = null;
+
+let deletions = null;
 
 function render (vnode, container) {
     // console.log(vnode,container);
@@ -34,7 +40,7 @@ function createNode (vnode) {
         updateFunctionComponent(vnode);
     }
     // reconcileChildren(props.children, node);
-    updateNode(props, node);
+    updateNode(node, {}, props);
     return node
 }
 
@@ -46,13 +52,24 @@ function createNode (vnode) {
 //     }
 // }
 
-function updateNode (props, node) {
-    Object.keys(props).filter(k => k !=="children").map(k => {
+function updateNode (node, preValue, nextValue) {
+    Object.keys(preValue).filter(k => k !=="children").map(k => {
         if (k.slice(0, 2) === "on") {
             let eventName = k.slice(2).toLowerCase();
-            node.addEventListener(eventName, props[k]);
+            node.removeEventListener(eventName, preValue[k]);
           } else {
-            node[k] = props[k];
+            if (!(k in nextValue)) {
+                node[k] = ""
+            }
+          }
+    })
+
+    Object.keys(nextValue).filter(k => k !=="children").map(k => {
+        if (k.slice(0, 2) === "on") {
+            let eventName = k.slice(2).toLowerCase();
+            node.addEventListener(eventName, nextValue[k]);
+          } else {
+            node[k] = nextValue[k];
           }
     })
 }
@@ -69,6 +86,9 @@ function updateHostComponent(fiber) {
 
 
 function updateFunctionComponent (fiber) {
+    wipFiber = fiber;
+    wipFiber.hooks = [];
+    wipFiber.hookIndex = 0;
     const { type, props } = fiber;
     const children = [type(props)];
     reconcileChildren(fiber, children);
@@ -83,17 +103,38 @@ function updateClassComponent (vnode) {
 
 function reconcileChildren(workInProgressFiber, children) {
     let prevSibling = null;
-    
+    let oldFiber = workInProgressFiber.base && workInProgressFiber.base.child;
     for(let i = 0; i < children.length; i++) {
         const child = children[i];
-        let newFiber = {
-            type: child.type,
-            props: child.props,
-            node: null,
-            base: null,
-            return: workInProgressFiber,
-            effectTag: PLACEMENT
-        };
+        let newFiber= null;
+        const sameType = child && oldFiber && oldFiber.type === child.type;
+        if (sameType) {
+            newFiber = {
+                type: child.type,
+                props: child.props,
+                node: oldFiber.node,
+                base: oldFiber,
+                return: workInProgressFiber,
+                effectTag: UPDATE,
+            }
+        }
+        if (!sameType && child) {
+            newFiber = {
+                type: child.type,
+                props: child.props,
+                node: null,
+                base: null,
+                return: workInProgressFiber,
+                effectTag: PLACEMENT,
+            }
+        }
+        if (!sameType && oldFiber) {
+            oldFiber.effectTag = DELETION;
+            deletions.push(oldFiber);
+        }
+        if (oldFiber) {
+            oldFiber = oldFiber.sibling
+        }
         if (i === 0 ) {
             workInProgressFiber.child = newFiber
         } else {
@@ -102,6 +143,14 @@ function reconcileChildren(workInProgressFiber, children) {
         prevSibling = newFiber
     }
     // console.log(workInProgressFiber);
+}
+
+function commitDeletions (fiber, parentNode) {
+    if (fiber.node) {
+        parentNode.removeChild(fiber.node);
+    } else {
+        fiber.child && commitDeletions(fiber.child, parentNode);
+    }
 }
 
 
@@ -127,6 +176,7 @@ function performUnitOfWork(fiber) {
     }
 }
 
+
 function workLoop(deadline) {
     while (nextUnitOfWork && deadline.timeRemaining() > 1) {
         nextUnitOfWork = performUnitOfWork(nextUnitOfWork)
@@ -138,7 +188,9 @@ function workLoop(deadline) {
 }
 
 function commitRoot() {
+    deletions.forEach(commitWorker);
     commitWorker(wipRoot.child);
+    currentNode = wipRoot;
     wipRoot = null;
 }
 
@@ -150,10 +202,15 @@ function commitWorker(fiber) {
     while (!parentNodeFiber.node) {
         parentNodeFiber = parentNodeFiber.return
     }
-    let parentNode = parentNodeFiber.node;
+    const parentNode = parentNodeFiber.node;
     if (fiber.effectTag === PLACEMENT && fiber.node) {
         // console.log(parentNode, fiber.node);
         parentNode.appendChild(fiber.node)
+    } else if (fiber.effectTag === UPDATE && fiber.node) {
+        console.log(fiber);
+        updateNode(fiber.node, fiber.base.props, fiber.props)
+    } else if (fiber.effectTag === DELETION && fiber.node) {
+        commitDeletions(fiber, parentNode);
     }
     commitWorker(fiber.child);
     commitWorker(fiber.sibling);
@@ -163,12 +220,34 @@ function commitWorker(fiber) {
 requestIdleCallback(workLoop);
 
 export const useState = (initState) => {
+    const oldHook = wipFiber.base && wipFiber.base.hooks[wipFiber.hookIndex];
 
-    const setState = (action) => {
-        console.log(action);
+    const hook = oldHook 
+    ? {
+        state: oldHook.state,
+        queue: oldHook.queue,
+    } 
+    : 
+    {
+        state: initState,
+        queue: []
     }
+    hook.queue.forEach(action => {hook.state = action});
+    const setState = (action) => {
+        hook.queue.push(action);
+        const newFiber = {
+            node: currentNode.node,
+            props: currentNode.props,
+            base: currentNode,
+        }
+        wipRoot = newFiber;
+        nextUnitOfWork = newFiber
+    }
+    wipFiber.hooks.push(hook);
+    wipFiber.hookIndex++;
+    deletions = [];
 
-    return [initState, setState];
+    return [hook.state, setState];
 }
 
 
